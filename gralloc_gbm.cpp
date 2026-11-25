@@ -105,6 +105,19 @@ static uint32_t get_gbm_format(int format)
 	return fmt;
 }
 
+#define GRALLOC_ALIGN(value, base) (((value) + ((base)-1)) & ~((base)-1))
+
+/*
+ * YV12 is allocated as a single GR88 bo. The GPU imports its three planes
+ * (EGL_ANDROID_image_native_buffer -> dma-buf import) with the luma pitch
+ * and half of it for the two chroma planes. Some drivers only accept linear
+ * planes whose pitch is a multiple of 256 bytes (radeonsi), so the luma
+ * pitch has to be a multiple of 512: otherwise eglCreateImage fails and
+ * surfaceflinger aborts ("Failed to create a valid texture") for nearly
+ * every video size.
+ */
+#define YV12_LUMA_PITCH_ALIGN 512
+
 static int gralloc_gbm_get_bpp(int format)
 {
 	int bpp;
@@ -173,9 +186,14 @@ static struct gbm_bo *gbm_import(struct gbm_device *gbm,
 	data.width = handle->width;
 	data.height = handle->height;
 	data.format = format;
-	/* Adjust the width and height for a GBM GR88 buffer */
+	/*
+	 * Adjust the width and height for a GBM GR88 buffer. The width comes
+	 * from the real stride the allocator got (see gbm_alloc), not from the
+	 * image width: with a narrower bo the driver clips CPU writes, and the
+	 * second chroma row stored in each bo row loses its tail.
+	 */
 	if (handle->format == HAL_PIXEL_FORMAT_YV12) {
-		data.width /= 2;
+		data.width = handle->stride / 2;
 		data.height += handle->height / 2;
 	}
 
@@ -214,10 +232,13 @@ static struct gbm_bo *gbm_alloc(struct gbm_device *gbm,
 
 	/*
 	 * For YV12, we request GR88, so halve the width since we're getting
-	 * 16bpp. Then increase the height by 1.5 for the U and V planes.
+	 * 16bpp. Then increase the height by 1.5 for the U and V planes. The
+	 * width is first aligned so the luma pitch is a multiple of
+	 * YV12_LUMA_PITCH_ALIGN (and each chroma pitch, half of it, a multiple
+	 * of 256 bytes).
 	 */
 	if (handle->format == HAL_PIXEL_FORMAT_YV12) {
-		width /= 2;
+		width = GRALLOC_ALIGN(width, YV12_LUMA_PITCH_ALIGN) / 2;
 		height += handle->height / 2;
 	}
 
@@ -466,8 +487,6 @@ int gralloc_gbm_bo_unlock(buffer_handle_t handle)
 	return 0;
 }
 
-#define GRALLOC_ALIGN(value, base) (((value) + ((base)-1)) & ~((base)-1))
-
 int gralloc_gbm_bo_lock_ycbcr(buffer_handle_t handle,
 		int usage, int x, int y, int w, int h,
 		struct android_ycbcr *ycbcr)
@@ -496,7 +515,8 @@ int gralloc_gbm_bo_lock_ycbcr(buffer_handle_t handle,
 		ycbcr->chroma_step = 2;
 		break;
 	case HAL_PIXEL_FORMAT_YV12:
-		ystride = hnd->width;
+		/* the real pitch of the bo, which is wider than the image */
+		ystride = hnd->stride;
 		cstride = GRALLOC_ALIGN(ystride / 2, 16);
 		ycbcr->y = addr;
 		ycbcr->cr = (unsigned char *)addr + ystride * hnd->height;
