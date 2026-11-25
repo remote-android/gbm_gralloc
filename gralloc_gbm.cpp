@@ -91,6 +91,9 @@ static uint32_t get_gbm_format(int format)
 	case HAL_PIXEL_FORMAT_BGRA_8888:
 		fmt = GBM_FORMAT_ARGB8888;
 		break;
+	case HAL_PIXEL_FORMAT_RGBA_1010102:
+		fmt = GBM_FORMAT_ABGR2101010;
+		break;
 	case HAL_PIXEL_FORMAT_YV12:
 		/* YV12 is planar, but must be a single buffer so ask for GR88 */
 		fmt = GBM_FORMAT_GR88;
@@ -113,6 +116,7 @@ static int gralloc_gbm_get_bpp(int format)
 	case HAL_PIXEL_FORMAT_RGBA_8888:
 	case HAL_PIXEL_FORMAT_RGBX_8888:
 	case HAL_PIXEL_FORMAT_BGRA_8888:
+	case HAL_PIXEL_FORMAT_RGBA_1010102:
 		bpp = 4;
 		break;
 	case HAL_PIXEL_FORMAT_RGB_888:
@@ -361,6 +365,16 @@ buffer_handle_t gralloc_gbm_bo_create(struct gbm_device *gbm,
 {
 	struct gbm_bo *bo;
 	native_handle_t *handle;
+
+	/*
+	 * A format without a known size per pixel would end in a division by
+	 * zero below, killing the allocator service and with it the whole of
+	 * Android. Refuse it instead.
+	 */
+	if (!gralloc_gbm_get_bpp(format)) {
+		ALOGE("unsupported format 0x%x (%dx%d)", format, width, height);
+		return NULL;
+	}
 
 	handle = gralloc_handle_create(width, height, format, usage);
 	if (!handle)
